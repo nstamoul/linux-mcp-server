@@ -207,9 +207,9 @@ class TestGatekeeperConfigIntegration:
     def mock_openai_post(self, mocker):
         mocker.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
         return mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK", "detail": ""}'),
+            return_value=(_responses_output('{"status": "OK", "detail": ""}'), None),
         )
 
     async def test_openai_provider_config(self, mocker, mock_openai_post):
@@ -240,9 +240,9 @@ class TestGatekeeperConfigIntegration:
             return_value="gcp-token",
         )
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK", "detail": ""}'),
+            return_value=(_responses_output('{"status": "OK", "detail": ""}'), None),
         )
         mocker.patch.object(
             CONFIG,
