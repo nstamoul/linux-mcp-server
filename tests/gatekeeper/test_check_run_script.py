@@ -49,7 +49,11 @@ class TestGatekeeperResultDescription:
         assert schema["additionalProperties"] is False
         assert set(schema["properties"]) == {"status", "detail"}
         assert schema["properties"]["status"]["enum"] == [m.value for m in GatekeeperStatus]
-        assert schema["required"] == ["status"]
+        # OpenAI's strict json_schema mode requires every property to be
+        # listed as required, even ones with a Python-side default like
+        # `detail` - some providers (e.g. codex-lb) reject the schema
+        # outright (400) if this isn't the case.
+        assert set(schema["required"]) == set(schema["properties"])
 
     @pytest.mark.parametrize("status,detail,expected_description", RESULT_CASES)
     def test_round_trip(self, status, detail, expected_description):
