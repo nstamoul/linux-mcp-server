@@ -6,6 +6,7 @@ either local or remote execution based on the provided parameters.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import shlex
@@ -76,6 +77,24 @@ def discover_ssh_key() -> str | None:
     logger.debug("Not providing an SSH key")
 
 
+def discover_ssh_password() -> str | None:
+    """
+    Discover the default SSH password for authentication.
+
+    Reads LINUX_MCP_SSH_PASSWORD (CONFIG.ssh_password). This is only the
+    global fallback default - per-rule passwords set via policy (SSH_PASSWORD
+    action) are read directly from ExecutionContext.ssh_password in
+    get_connection() and take precedence, mirroring how a custom
+    ExecutionContext.ssh_key_path overrides the key returned by
+    discover_ssh_key().
+
+    Returns:
+        The password if configured, None otherwise.
+    """
+    password = CONFIG.ssh_password.get_secret_value()
+    return password or None
+
+
 class SSHConnectionManager:
     """
     Manages SSH connections with connection pooling.
@@ -88,6 +107,7 @@ class SSHConnectionManager:
     _instance: Optional["SSHConnectionManager"] = None
     _connections: dict[str, asyncssh.SSHClientConnection]
     _ssh_key: str | None
+    _ssh_password: str | None
 
     def __new__(cls):
         """Implement singleton pattern."""
@@ -95,6 +115,7 @@ class SSHConnectionManager:
             cls._instance = super().__new__(cls)
             cls._instance._connections = {}
             cls._instance._ssh_key = discover_ssh_key()
+            cls._instance._ssh_password = discover_ssh_password()
         return cls._instance
 
     async def get_connection(self, host: str) -> asyncssh.SSHClientConnection:
@@ -115,14 +136,24 @@ class SSHConnectionManager:
         context = get_execution_context()
         if context is not None:
             ssh_key = str(context.ssh_key_path) if context.ssh_key_path else self._ssh_key
-            username = context.ssh_key_user or CONFIG.user
+            ssh_password = context.ssh_password.get_secret_value() if context.ssh_password else self._ssh_password
+            username = context.ssh_key_user or context.ssh_password_user or CONFIG.user
         else:
             # No context set - use defaults
             ssh_key = self._ssh_key
+            ssh_password = self._ssh_password
             username = CONFIG.user
 
-        # Build pool key including SSH key and username to avoid connection reuse conflicts
-        key = f"{host}:{ssh_key or 'default'}:{username or 'default'}"
+        # Build pool key including SSH key/password and username to avoid
+        # connection reuse conflicts. A short hash of the password (not the
+        # password itself) is used so two different passwords to the same
+        # host/user get distinct pool entries - a flat "has a password or
+        # not" marker would otherwise let a stale connection from an earlier
+        # password silently get reused for a new one - while the raw value
+        # still never appears in the key, so it can't leak via logs or the
+        # pool key string.
+        password_marker = hashlib.sha256(ssh_password.encode()).hexdigest()[:12] if ssh_password else "nopwd"
+        key = f"{host}:{ssh_key or 'default'}:{password_marker}:{username or 'default'}"
 
         # Return existing connection if available
         if key in self._connections:
@@ -162,9 +193,14 @@ class SSHConnectionManager:
                 "passphrase": CONFIG.key_passphrase.get_secret_value() or None,
             }
 
-            # Use custom SSH key if provided, otherwise use default
+            # Use custom SSH key if provided, otherwise use default. A key
+            # takes precedence over a password if both are somehow set -
+            # key-based auth is the safer default and asyncssh will only
+            # use one method per connection attempt anyway.
             if ssh_key:
                 connect_kwargs["client_keys"] = [ssh_key]
+            elif ssh_password:
+                connect_kwargs["password"] = ssh_password
 
             # Use custom username if provided, otherwise use CONFIG.user
             if username:
@@ -399,7 +435,7 @@ async def execute_command(
 
     if host:
         # Remote execution, check permissions
-        if not context.allow_ssh_default and context.ssh_key_path is None:
+        if not context.allow_ssh_default and context.ssh_key_path is None and context.ssh_password is None:
             raise RuntimeError("Remote execution not allowed")
 
         logger.debug(f"Routing to remote execution: {host} | command={cmd_str}")

@@ -12,6 +12,7 @@ from linux_mcp_server.auth_policy import get_policy
 from linux_mcp_server.auth_policy import PolicyAction
 from linux_mcp_server.auth_policy import PolicyRule
 from linux_mcp_server.auth_policy import SSHKeyConfig
+from linux_mcp_server.auth_policy import SSHPasswordConfig
 
 
 class TestSSHKeyConfig:
@@ -19,6 +20,13 @@ class TestSSHKeyConfig:
         config = SSHKeyConfig(path="/path/to/key", user="admin")
         assert config.path == "/path/to/key"
         assert config.user == "admin"
+
+
+class TestSSHPasswordConfig:
+    def test_valid_config(self):
+        config = SSHPasswordConfig(user="admin", password_env_var="CUSTOMER_A_SSH_PASSWORD")
+        assert config.user == "admin"
+        assert config.password_env_var == "CUSTOMER_A_SSH_PASSWORD"
 
 
 class TestPolicyRuleHostMatching:
@@ -75,6 +83,29 @@ class TestPolicyRuleValidation:
         else:
             rule = make_rule()
             assert rule.tools == tools
+
+    def test_ssh_password_action_requires_config(self):
+        with pytest.raises(
+            ValidationError,
+            match=r"Rule with action 'ssh_password' must have ssh_password\(user and password_env_var\) configured",
+        ):
+            PolicyRule(
+                host="*.example.com",
+                tools=["*"],
+                claims={"email": "admin@example.com"},
+                action=PolicyAction.SSH_PASSWORD,
+            )
+
+    def test_ssh_password_action_with_config_succeeds(self):
+        rule = PolicyRule(
+            host="*.example.com",
+            tools=["*"],
+            claims={"email": "admin@example.com"},
+            action=PolicyAction.SSH_PASSWORD,
+            ssh_password=SSHPasswordConfig(user="admin", password_env_var="ADMIN_SSH_PASSWORD"),
+        )
+        assert rule.ssh_password is not None
+        assert rule.ssh_password.password_env_var == "ADMIN_SSH_PASSWORD"
 
 
 class TestPolicyRuleToolMatching:
@@ -270,7 +301,7 @@ class TestAuthPolicyEvaluate:
         )
 
         # First rule matches
-        action, ssh_key, all_users = policy.evaluate(
+        action, ssh_key, ssh_password, all_users = policy.evaluate(
             tool_name="any_tool",
             tool_tags=set(),
             target_host="any-host",
@@ -293,7 +324,7 @@ class TestAuthPolicyEvaluate:
         )
 
         # No rule matches
-        action, ssh_key, all_users = policy.evaluate(
+        action, ssh_key, ssh_password, all_users = policy.evaluate(
             tool_name="any_tool",
             tool_tags=set(),
             target_host="stage-host",
@@ -301,6 +332,7 @@ class TestAuthPolicyEvaluate:
         )
         assert action == PolicyAction.DENY
         assert ssh_key is None
+        assert ssh_password is None
         assert all_users is False
 
     def test_ssh_key_action_returns_config(self):
@@ -317,7 +349,7 @@ class TestAuthPolicyEvaluate:
             ]
         )
 
-        action, ssh_key, all_users = policy.evaluate(
+        action, ssh_key, ssh_password, all_users = policy.evaluate(
             tool_name="any_tool",
             tool_tags=set(),
             target_host="mysql.db.example.com",
@@ -325,6 +357,31 @@ class TestAuthPolicyEvaluate:
         )
         assert action == PolicyAction.SSH_KEY
         assert ssh_key == ssh_key_config
+        assert all_users is False
+
+    def test_ssh_password_action_returns_config(self):
+        ssh_password_config = SSHPasswordConfig(user="db-admin", password_env_var="DB_SSH_PASSWORD")
+        policy = AuthPolicy(
+            rules=[
+                PolicyRule(
+                    host="*.db.example.com",
+                    tools=["*"],
+                    claims={"groups": "ops"},
+                    action=PolicyAction.SSH_PASSWORD,
+                    ssh_password=ssh_password_config,
+                ),
+            ]
+        )
+
+        action, ssh_key, ssh_password, all_users = policy.evaluate(
+            tool_name="any_tool",
+            tool_tags=set(),
+            target_host="mysql.db.example.com",
+            token_claims={"groups": ["ops", "dev"]},
+        )
+        assert action == PolicyAction.SSH_PASSWORD
+        assert ssh_key is None
+        assert ssh_password == ssh_password_config
         assert all_users is False
 
 
@@ -382,6 +439,33 @@ rules:
             assert policy.rules[0].ssh_key is not None
             assert policy.rules[0].ssh_key.path == "/keys/db-key"
             assert policy.rules[0].ssh_key.user == "db-admin"
+        finally:
+            path.unlink()
+
+    def test_load_with_ssh_password(self):
+        yaml_content = """
+rules:
+  - host: "*.customer-a.example.com"
+    tools: ["*"]
+    claims:
+      groups: support
+    action: ssh_password
+    ssh_password:
+      password_env_var: CUSTOMER_A_SSH_PASSWORD
+      user: support
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            policy = AuthPolicy.from_yaml(path)
+            assert len(policy.rules) == 1
+            assert policy.rules[0].action == PolicyAction.SSH_PASSWORD
+            assert policy.rules[0].ssh_password is not None
+            assert policy.rules[0].ssh_password.password_env_var == "CUSTOMER_A_SSH_PASSWORD"
+            assert policy.rules[0].ssh_password.user == "support"
         finally:
             path.unlink()
 
@@ -443,7 +527,7 @@ class TestEvaluatePolicy:
     def test_delegates_to_policy(self, mocker):
         # Mock get_policy to return a specific policy
         mock_policy = mocker.Mock(spec=AuthPolicy)
-        mock_policy.evaluate.return_value = (PolicyAction.SSH_DEFAULT, None, False)
+        mock_policy.evaluate.return_value = (PolicyAction.SSH_DEFAULT, None, None, False)
         mocker.patch("linux_mcp_server.auth_policy.get_policy", return_value=mock_policy)
 
         # Create mock Tool object
@@ -451,7 +535,7 @@ class TestEvaluatePolicy:
         mock_tool.name = "test_tool"
         mock_tool.tags = {"tag1"}
 
-        action, ssh_key = evaluate_policy(
+        action, ssh_key, ssh_password = evaluate_policy(
             tool=mock_tool,
             target_host="test-host",
             token_claims={"email": "user@example.com"},
@@ -466,3 +550,4 @@ class TestEvaluatePolicy:
         )
         assert action == PolicyAction.SSH_DEFAULT
         assert ssh_key is None
+        assert ssh_password is None

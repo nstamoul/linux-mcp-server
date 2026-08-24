@@ -3,6 +3,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from pydantic import BaseModel
+from pydantic import SecretStr
 
 
 class ExecutionContext(BaseModel):
@@ -10,6 +11,8 @@ class ExecutionContext(BaseModel):
     allow_ssh_default: bool = False
     ssh_key_path: Path | None = None
     ssh_key_user: str | None = None
+    ssh_password: SecretStr | None = None
+    ssh_password_user: str | None = None
 
 
 # Global ContextVar for storing the current execution context if no context is set execution should fail

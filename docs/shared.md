@@ -192,6 +192,23 @@ rules:
          user: rhel-mcp-developers
 ```
 
+Example 3 (fork addition, not in upstream): password-based access for ad-hoc troubleshooting
+where a standing SSH key isn't available. See [Password Authentication](ssh.md#password-authentication-fork-addition).
+
+``` yaml
+rules:
+  - claims:
+         groups: support
+    host: "*.customer-a.example.com"
+    tools: ["*"]
+    action: ssh_password
+    ssh_password:
+         user: support
+         # Password is read from this env var at connection time, never
+         # stored in this file.
+         password_env_var: CUSTOMER_A_SSH_PASSWORD
+```
+
 See [Authorization Policy](config-reference.md#authorization-policy) for details of the authorization policy yaml file.
 
 ## Using service accounts on target systems

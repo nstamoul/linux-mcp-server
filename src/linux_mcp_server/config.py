@@ -202,6 +202,11 @@ class Config(BaseSettings):
     key_passphrase: SecretStr = SecretStr("")
     search_for_ssh_key: bool = False
 
+    # SSH password authentication (fallback default; per-rule passwords are
+    # sourced from a named environment variable via SSHPasswordConfig, never
+    # stored in the policy file itself - see auth_policy.SSHPasswordConfig)
+    ssh_password: SecretStr = SecretStr("")
+
     # SSH host key verification (security)
     verify_host_keys: bool = True
     known_hosts_path: Path | None = None  # Custom path to known_hosts file

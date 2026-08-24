@@ -3,6 +3,8 @@ from pathlib import Path
 import asyncssh
 import pytest
 
+from pydantic import SecretStr
+
 from linux_mcp_server.connection.ssh import SSHConnectionManager
 from linux_mcp_server.execution_context import ExecutionContext
 from linux_mcp_server.execution_context import use_execution_context
@@ -192,3 +194,55 @@ async def test_get_connection_uses_custom_username_from_context(mocker, mock_asy
 
     call_kwargs = mock_asyncssh_connect.call_args.kwargs
     assert call_kwargs.get("username") == "customuser"
+
+
+async def test_get_connection_uses_password_from_context(mocker, mock_asyncssh_connect):
+    """Test get_connection reads ssh_password from ExecutionContext and passes it to asyncssh."""
+    manager = SSHConnectionManager()
+    manager._connections.clear()
+    manager._ssh_key = None
+
+    context = ExecutionContext(ssh_password=SecretStr("hunter2"), ssh_password_user="customer-support")
+
+    with use_execution_context(context):
+        await manager.get_connection("testhost")
+
+    call_kwargs = mock_asyncssh_connect.call_args.kwargs
+    assert call_kwargs.get("password") == "hunter2"
+    assert call_kwargs.get("username") == "customer-support"
+    assert "client_keys" not in call_kwargs
+
+
+async def test_get_connection_key_takes_precedence_over_password(mocker, mock_asyncssh_connect):
+    """If both a key and a password are somehow available, the key wins."""
+    manager = SSHConnectionManager()
+    manager._connections.clear()
+
+    context = ExecutionContext(
+        ssh_key_path=Path("/custom/.ssh/custom_key"),
+        ssh_password=SecretStr("hunter2"),
+    )
+
+    with use_execution_context(context):
+        await manager.get_connection("testhost")
+
+    call_kwargs = mock_asyncssh_connect.call_args.kwargs
+    assert call_kwargs.get("client_keys") == ["/custom/.ssh/custom_key"]
+    assert "password" not in call_kwargs
+
+
+async def test_get_connection_password_never_leaks_into_pool_key(mocker, mock_asyncssh_connect):
+    """Two different passwords to the same host/user must not collide in the connection pool,
+    and the pool key itself must not contain the raw password value."""
+    manager = SSHConnectionManager()
+    manager._connections.clear()
+    manager._ssh_key = None
+
+    with use_execution_context(ExecutionContext(ssh_password=SecretStr("password-one"))):
+        await manager.get_connection("testhost")
+
+    with use_execution_context(ExecutionContext(ssh_password=SecretStr("password-two"))):
+        await manager.get_connection("testhost")
+
+    assert mock_asyncssh_connect.call_count == 2
+    assert not any("password-one" in k or "password-two" in k for k in manager._connections)

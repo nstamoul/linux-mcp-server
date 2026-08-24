@@ -34,6 +34,41 @@ The Linux MCP Server uses SSH to execute commands on remote Linux systems. This 
 
     If prompted for a password, key-based authentication is not configured correctly.
 
+## Password Authentication (fork addition)
+
+!!! note "Not in upstream rhel-lightspeed/linux-mcp-server"
+    This section documents a fork-specific addition, for cases where key-based access
+    to the target system isn't available - e.g. ad-hoc troubleshooting on a
+    customer's host you don't hold a standing key for. It requires an authorization
+    policy (see [Configuring the Authorization policy](shared.md#configuring-the-authorization-policy))
+    to be configured, since a raw password is never accepted directly from a tool call argument.
+
+Add an `ssh_password` rule to your policy file instead of (or alongside) `ssh_key` rules:
+
+```yaml
+rules:
+  - host: "*.customer-a.example.com"
+    tools: ["*"]
+    claims:
+      groups: support
+    action: ssh_password
+    ssh_password:
+      user: support
+      password_env_var: CUSTOMER_A_SSH_PASSWORD
+```
+
+`password_env_var` names an environment variable to read the password from **at the point
+of use** - the password itself never lives in the policy file, in `git`, or in any request
+the model makes. Set that variable in the server's environment (e.g. injected by Vault at
+container start, or a per-engagement secret you set before a troubleshooting session):
+
+```bash
+export CUSTOMER_A_SSH_PASSWORD="..."
+```
+
+If both a key and a password are available for a given connection, the key takes
+precedence - password auth is the fallback, not the default.
+
 ## Specifying Remote Hosts
 
 When using MCP tools, the `host` parameter may be a fully qualified domain name (FQDN), an alias from `~/.ssh/config`, or an IP address.

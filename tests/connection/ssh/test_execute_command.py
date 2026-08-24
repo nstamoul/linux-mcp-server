@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import SecretStr
+
 from linux_mcp_server.connection.ssh import execute_command
 from linux_mcp_server.connection.ssh import SSHConnectionManager
 from linux_mcp_server.execution_context import ExecutionContext
@@ -125,3 +127,32 @@ async def test_remote_execution_with_ssh_key(mock_connection_manager):
 
     assert returncode == 0
     assert mock_connection_manager.execute_remote.call_count == 1
+
+
+async def test_remote_execution_with_ssh_password(mock_connection_manager):
+    """Test remote execution succeeds with ssh_password set (no key required)."""
+    context = ExecutionContext(
+        allow_ssh_default=False,
+        ssh_password=SecretStr("hunter2"),
+        ssh_password_user="support",
+    )
+
+    with use_execution_context(context):
+        returncode, stdout, stderr = await execute_command(
+            ["ls", "-la"],
+            host="remote.example.com",
+        )
+
+    assert returncode == 0
+    assert mock_connection_manager.execute_remote.call_count == 1
+
+
+async def test_remote_execution_denied_without_key_or_password(mock_connection_manager):
+    """Test remote execution still fails when neither a key nor a password is set."""
+    context = ExecutionContext(allow_ssh_default=False, ssh_key_path=None, ssh_password=None)
+
+    with use_execution_context(context):
+        with pytest.raises(RuntimeError, match="Remote execution not allowed"):
+            await execute_command(["ls", "-la"], host="remote.example.com")
+
+    assert mock_connection_manager.execute_remote.call_count == 0

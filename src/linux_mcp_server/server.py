@@ -1,6 +1,7 @@
 """Core MCP server for Linux diagnostics using FastMCP."""
 
 import logging
+import os
 
 from dataclasses import dataclass
 from importlib import resources
@@ -18,12 +19,14 @@ from fastmcp.server.middleware.middleware import CallNext
 from fastmcp.utilities.components import FastMCPComponent
 from mcp.types import InitializeRequest
 from mcp.types import InitializeResult
+from pydantic import SecretStr
 
 import linux_mcp_server
 
 from linux_mcp_server.auth import create_auth_provider
 from linux_mcp_server.auth_policy import evaluate_policy
 from linux_mcp_server.auth_policy import PolicyAction
+from linux_mcp_server.auth_policy import SSHPasswordConfig
 from linux_mcp_server.config import CONFIG
 from linux_mcp_server.config import Toolset
 from linux_mcp_server.config import Transport
@@ -239,6 +242,34 @@ class ComponentFilter:
         )
 
 
+def _build_ssh_password_context(ssh_password_config: SSHPasswordConfig | None) -> ExecutionContext:
+    """Build an ExecutionContext for the SSH_PASSWORD policy action.
+
+    The password itself is never stored in the policy file - only the name
+    of an environment variable to read it from at the point of use (e.g.
+    injected by Vault into the container's environment), mirroring how
+    SSH_KEY stores a key *path*, never key material.
+    """
+    if not ssh_password_config:
+        raise RuntimeError("Policy validation error: SSH_PASSWORD action requires ssh_password configuration.")
+
+    password_value = os.environ.get(ssh_password_config.password_env_var)
+    if password_value is None:
+        raise RuntimeError(
+            f"Environment variable '{ssh_password_config.password_env_var}' referenced by "
+            "ssh_password policy is not set."
+        )
+
+    # Never log the password itself - only which env var it came from.
+    logger.debug(
+        f"SSH password override: user={ssh_password_config.user}, env_var={ssh_password_config.password_env_var}"
+    )
+    return ExecutionContext(
+        ssh_password=SecretStr(password_value),
+        ssh_password_user=ssh_password_config.user,
+    )
+
+
 # Middleware to enforce authorization policy
 class AuthorizationMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
@@ -272,7 +303,7 @@ class AuthorizationMiddleware(Middleware):
         log_level(f"Tool call: {tool.name}, Host: {target_host or 'local'}, User: {email}")
 
         # Evaluate policy by tool, host and claims matching
-        action, ssh_key_config = evaluate_policy(tool, target_host, claims)
+        action, ssh_key_config, ssh_password_config = evaluate_policy(tool, target_host, claims)
 
         # Validate that action matches execution mode (should be prevented by policy validation)
         is_local_execution = not target_host
@@ -308,6 +339,8 @@ class AuthorizationMiddleware(Middleware):
                     ssh_key_path=Path(ssh_key_config.path),
                     ssh_key_user=ssh_key_config.user,
                 )
+            case PolicyAction.SSH_PASSWORD:
+                exec_context = _build_ssh_password_context(ssh_password_config)
             case _:  # pragma: no cover
                 raise RuntimeError(f"Unexpected policy action: {action}")
 

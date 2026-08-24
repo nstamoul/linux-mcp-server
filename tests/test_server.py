@@ -18,6 +18,7 @@ from linux_mcp_server.auth_policy import AuthPolicy
 from linux_mcp_server.auth_policy import PolicyAction
 from linux_mcp_server.auth_policy import PolicyRule
 from linux_mcp_server.auth_policy import SSHKeyConfig
+from linux_mcp_server.auth_policy import SSHPasswordConfig
 from linux_mcp_server.config import Toolset
 
 
@@ -301,7 +302,7 @@ class TestAuthorizationMiddleware:
 
         mocker.patch(
             "linux_mcp_server.server.evaluate_policy",
-            return_value=(PolicyAction.LOCAL, None),
+            return_value=(PolicyAction.LOCAL, None, None),
         )
 
         with pytest.raises(
@@ -315,7 +316,7 @@ class TestAuthorizationMiddleware:
 
         mocker.patch(
             "linux_mcp_server.server.evaluate_policy",
-            return_value=(PolicyAction.SSH_DEFAULT, None),
+            return_value=(PolicyAction.SSH_DEFAULT, None, None),
         )
 
         with pytest.raises(
@@ -329,7 +330,7 @@ class TestAuthorizationMiddleware:
 
         mocker.patch(
             "linux_mcp_server.server.evaluate_policy",
-            return_value=(PolicyAction.SSH_KEY, None),
+            return_value=(PolicyAction.SSH_KEY, None, None),
         )
 
         with pytest.raises(ToolError, match=r"Policy validation error: SSH_KEY action requires ssh_key configuration."):
@@ -443,3 +444,59 @@ class TestExecutionContextMiddlewareIntegration:
         assert captured_context.allow_ssh_default is False
         assert captured_context.ssh_key_path == Path("/keys/server1.key")
         assert captured_context.ssh_key_user == "serviceaccount"
+
+    async def test_ssh_password_policy_sets_password_context(self, mcp_client, mocker, capture_context):
+        """Verify SSH_PASSWORD policy action sets ExecutionContext with ssh_password and ssh_password_user,
+        sourcing the password from the named environment variable (never from the policy file itself)."""
+        mocker.patch("linux_mcp_server.server.CONFIG.transport", "streamable-http")
+        mocker.patch("linux_mcp_server.server.CONFIG.policy_path", "/etc/policy.json")
+        mocker.patch.dict("os.environ", {"CUSTOMER_A_SSH_PASSWORD": "hunter2"})
+        mocker.patch(
+            "linux_mcp_server.auth_policy.get_policy",
+            return_value=AuthPolicy(
+                rules=[
+                    PolicyRule(
+                        host="server1.example.com",
+                        tools=["@fixed"],
+                        all_users=True,
+                        action=PolicyAction.SSH_PASSWORD,
+                        ssh_password=SSHPasswordConfig(password_env_var="CUSTOMER_A_SSH_PASSWORD", user="support"),
+                    )
+                ]
+            ),
+        )
+
+        await mcp_client.call_tool("get_memory_information", {"host": "server1.example.com"})
+
+        captured_context = capture_context.get_context()
+        assert captured_context is not None
+        assert captured_context.allow_local is False
+        assert captured_context.allow_ssh_default is False
+        assert captured_context.ssh_key_path is None
+        assert captured_context.ssh_password is not None
+        assert captured_context.ssh_password.get_secret_value() == "hunter2"
+        assert captured_context.ssh_password_user == "support"
+
+    async def test_ssh_password_policy_missing_env_var_raises(self, mcp_client, mocker):
+        """Verify SSH_PASSWORD policy action fails loudly if its referenced env var isn't set,
+        rather than silently connecting with no credentials."""
+        mocker.patch("linux_mcp_server.server.CONFIG.transport", "streamable-http")
+        mocker.patch("linux_mcp_server.server.CONFIG.policy_path", "/etc/policy.json")
+        mocker.patch.dict("os.environ", {}, clear=False)
+        mocker.patch(
+            "linux_mcp_server.auth_policy.get_policy",
+            return_value=AuthPolicy(
+                rules=[
+                    PolicyRule(
+                        host="server1.example.com",
+                        tools=["@fixed"],
+                        all_users=True,
+                        action=PolicyAction.SSH_PASSWORD,
+                        ssh_password=SSHPasswordConfig(password_env_var="DOES_NOT_EXIST_SSH_PASSWORD", user="support"),
+                    )
+                ]
+            ),
+        )
+
+        with pytest.raises(ToolError, match=r"DOES_NOT_EXIST_SSH_PASSWORD.*not set"):
+            await mcp_client.call_tool("get_memory_information", {"host": "server1.example.com"})

@@ -23,6 +23,7 @@ logger = logging.getLogger("linux-mcp-server")
 class PolicyAction(str, Enum):
     DENY = "deny"
     SSH_KEY = "ssh_key"
+    SSH_PASSWORD = "ssh_password"
     SSH_DEFAULT = "ssh_default"
     LOCAL = "local"
 
@@ -32,12 +33,21 @@ class SSHKeyConfig(BaseModel):
     user: str
 
 
+class SSHPasswordConfig(BaseModel):
+    user: str
+    # Name of an environment variable to read the password from at the point
+    # of use (e.g. injected by Vault into the container's environment) -
+    # never the raw password itself, so it never lives in the policy file.
+    password_env_var: str
+
+
 class PolicyRule(BaseModel):
     host: str
     tools: list[str]
     claims: dict[str, Any] = {}
     action: PolicyAction
     ssh_key: SSHKeyConfig | None = None
+    ssh_password: SSHPasswordConfig | None = None
     all_users: bool = False
 
     # Validate that all_users and claims are mutually exclusive
@@ -77,6 +87,15 @@ class PolicyRule(BaseModel):
     def validate_ssh_key_config(self):
         if self.action == PolicyAction.SSH_KEY and self.ssh_key is None:
             raise ValueError("Rule with action 'ssh_key' must have ssh_key(path and user) configured")
+        return self
+
+    # Validate that SSH_PASSWORD action has ssh_password configuration
+    @model_validator(mode="after")
+    def validate_ssh_password_config(self):
+        if self.action == PolicyAction.SSH_PASSWORD and self.ssh_password is None:
+            raise ValueError(
+                "Rule with action 'ssh_password' must have ssh_password(user and password_env_var) configured"
+            )
         return self
 
     def matches_host(self, target_host: str | None) -> bool:
@@ -178,22 +197,23 @@ class AuthPolicy(BaseModel):
             raise RuntimeError(f"Failed to load auth policy from {yaml_path}: {e}") from e
 
     # Evaluate the policy for a given context
-    # returns (action, ssh_key_config, all_users) if no rules match, returns (DENY, None, False)
+    # returns (action, ssh_key_config, ssh_password_config, all_users)
+    # if no rules match, returns (DENY, None, None, False)
     def evaluate(
         self,
         tool_name: str,
         tool_tags: set[str],
         target_host: str | None,
         token_claims: dict[str, Any],
-    ) -> tuple[PolicyAction, SSHKeyConfig | None, bool]:
+    ) -> tuple[PolicyAction, SSHKeyConfig | None, SSHPasswordConfig | None, bool]:
 
         for rule in self.rules:
             if rule.matches(tool_name, tool_tags, target_host, token_claims):
                 logger.debug(f"Policy match: tool={tool_name}, host={target_host}, action={rule.action.value}")
-                return rule.action, rule.ssh_key, rule.all_users
+                return rule.action, rule.ssh_key, rule.ssh_password, rule.all_users
 
         logger.warning(f"No policy rule matched: tool={tool_name}, host={target_host}, claims={token_claims}")
-        return PolicyAction.DENY, None, False
+        return PolicyAction.DENY, None, None, False
 
 
 # Get the current policy loading it if necessary
@@ -216,9 +236,9 @@ def evaluate_policy(
     tool: Tool,
     target_host: str | None,
     token_claims: dict[str, Any],
-) -> tuple[PolicyAction, SSHKeyConfig | None]:
+) -> tuple[PolicyAction, SSHKeyConfig | None, SSHPasswordConfig | None]:
     policy = get_policy()
     tool_name = tool.name
     tool_tags = tool.tags if tool.tags else set()
-    action, ssh_key_config, _ = policy.evaluate(tool_name, tool_tags, target_host, token_claims)
-    return action, ssh_key_config
+    action, ssh_key_config, ssh_password_config, _ = policy.evaluate(tool_name, tool_tags, target_host, token_claims)
+    return action, ssh_key_config, ssh_password_config

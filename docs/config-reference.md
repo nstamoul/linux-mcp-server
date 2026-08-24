@@ -162,15 +162,19 @@ Each rule has the following properties that are used for matching:
     - for all other types for `<value>` the values must match exactly (example: `email_verified: true`)
  - **`all_users`** (boolean) - `true` if this rule should match all users. Either `all_users: true` or a non-empty `claims` must be specified; a rule with `all_users: false` (the default) and no `claims` is invalid.
 
-The rule also specifies an action and, if the action is `ssh_key`, additional properties for that action.
+The rule also specifies an action and, if the action is `ssh_key` or `ssh_password`, additional properties for that action.
 
- - **`action`** (one of `deny`, `local`, `ssh_default`, `ssh_key`) - what to do for a matching rule
+ - **`action`** (one of `deny`, `local`, `ssh_default`, `ssh_key`, `ssh_password`) - what to do for a matching rule
     - **`deny`** - deny execution of the tool
     - **`local`** - allow the tool to be executed on the local system
     - **`ssh_default`** - allow the tool to be executed on a remote system, using default SSH key lookup
     - **`ssh_key`** - allow the tool to be executed on a remote system using a specific SSH key identified by path
+    - **`ssh_password`** (fork addition, not in upstream) - allow the tool to be executed on a remote system using password authentication
  - **`ssh_key`**: Required when `action` is `ssh_key`.
     - **`path`**: (string) - path to an SSH key to use to connect to a remote system
+    - **`user`**: (string) - username to use on the remote system
+ - **`ssh_password`** (fork addition): Required when `action` is `ssh_password`. See [Password Authentication](ssh.md#password-authentication-fork-addition).
+    - **`password_env_var`**: (string) - name of an environment variable to read the password from at connection time. The password itself is never stored in the policy file.
     - **`user`**: (string) - username to use on the remote system
 
 ## Examples
