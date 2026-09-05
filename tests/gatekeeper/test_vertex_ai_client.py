@@ -97,9 +97,9 @@ class TestVertexAIClient:
     async def test_complete_openai_compatible_on_vertex(self, gatekeeper_config, mocker):
         gatekeeper_config.model = "gpt-oss-120b-maas"
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK"}'),
+            return_value=(_responses_output('{"status": "OK"}'), None),
         )
 
         result = await vertex_ai_client.complete_vertex_ai("prompt", max_tokens=8000)
@@ -115,9 +115,9 @@ class TestVertexAIClient:
             base_url="https://custom.example.com/v1/projects/p/locations/global/endpoints/openapi",
         )
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK"}'),
+            return_value=(_responses_output('{"status": "OK"}'), None),
         )
 
         await vertex_ai_client.complete_vertex_ai("prompt", max_tokens=8000)

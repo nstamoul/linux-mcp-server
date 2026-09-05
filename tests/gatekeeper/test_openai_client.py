@@ -55,12 +55,15 @@ class TestOpenAIClient:
 
     async def test_complete_openai_uses_responses_api(self, gatekeeper_config, mocker):
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value={
-                **_responses_output('{"status": "OK", "detail": ""}'),
-                "usage": {"input_tokens": 11, "output_tokens": 4},
-            },
+            return_value=(
+                {
+                    **_responses_output('{"status": "OK", "detail": ""}'),
+                    "usage": {"input_tokens": 11, "output_tokens": 4},
+                },
+                None,
+            ),
         )
 
         result = await openai_client.complete_openai("prompt", max_tokens=8000)
@@ -77,9 +80,9 @@ class TestOpenAIClient:
     async def test_complete_openai_uses_responses_api_for_custom_base_url(self, gatekeeper_config, mocker):
         gatekeeper_config.openai = OpenAIGatekeeperConfig(base_url="http://localhost:11434/v1")
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK", "detail": ""}'),
+            return_value=(_responses_output('{"status": "OK", "detail": ""}'), None),
         )
 
         result = await openai_client.complete_openai("prompt", max_tokens=8000)
@@ -89,7 +92,7 @@ class TestOpenAIClient:
 
     async def test_complete_openai_propagates_responses_api_errors(self, gatekeeper_config, mocker):
         mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
             side_effect=GatekeeperHTTPError("openai", 404, "not found"),
         )
@@ -100,9 +103,9 @@ class TestOpenAIClient:
     async def test_structured_output_disabled(self, gatekeeper_config, mocker):
         gatekeeper_config.structured_output = False
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK"}'),
+            return_value=(_responses_output('{"status": "OK"}'), None),
         )
 
         await openai_client.complete_openai("prompt", max_tokens=8000)
@@ -112,9 +115,9 @@ class TestOpenAIClient:
 
     async def test_complete_openai_transport_overrides(self, gatekeeper_config, mocker):
         mock_post = mocker.patch(
-            "linux_mcp_server.gatekeeper.openai_client.post_json",
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
             new_callable=mocker.AsyncMock,
-            return_value=_responses_output('{"status": "OK"}'),
+            return_value=(_responses_output('{"status": "OK"}'), None),
         )
 
         await openai_client.complete_openai(
@@ -131,4 +134,74 @@ class TestOpenAIClient:
         mocker.patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False)
 
         with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
+            await openai_client.complete_openai("prompt", max_tokens=8000)
+
+    async def test_complete_openai_reassembles_sse_stream(self, gatekeeper_config, mocker):
+        # Shape captured from a real codex-lb response: response.completed's
+        # own `response.output` is empty, so the text must come from the
+        # per-item response.output_item.done event instead.
+        events = [
+            {"type": "codex.keepalive"},
+            {"type": "response.created", "response": {"status": "in_progress", "output": []}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"status": "OK", "detail": ""}'}],
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"input_tokens": 13, "output_tokens": 5},
+                },
+            },
+        ]
+        mocker.patch(
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
+            new_callable=mocker.AsyncMock,
+            return_value=(None, events),
+        )
+
+        result = await openai_client.complete_openai("prompt", max_tokens=8000)
+
+        assert result.text == '{"status": "OK", "detail": ""}'
+        assert result.prompt_tokens == 13
+        assert result.completion_tokens == 5
+
+    async def test_complete_openai_sse_stream_error_event_raises(self, gatekeeper_config, mocker):
+        events = [
+            {"type": "response.created", "response": {"status": "in_progress", "output": []}},
+            {"type": "error", "code": "rate_limited", "message": "too many requests"},
+        ]
+        mocker.patch(
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
+            new_callable=mocker.AsyncMock,
+            return_value=(None, events),
+        )
+
+        with pytest.raises(GatekeeperHTTPError, match="rate_limited"):
+            await openai_client.complete_openai("prompt", max_tokens=8000)
+
+    async def test_complete_openai_sse_stream_failed_response_raises(self, gatekeeper_config, mocker):
+        events = [
+            {"type": "response.created", "response": {"status": "in_progress", "output": []}},
+            {
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "output": [],
+                    "error": {"code": "server_error", "message": "boom"},
+                },
+            },
+        ]
+        mocker.patch(
+            "linux_mcp_server.gatekeeper.openai_client.post_maybe_sse",
+            new_callable=mocker.AsyncMock,
+            return_value=(None, events),
+        )
+
+        with pytest.raises(GatekeeperHTTPError, match="server_error"):
             await openai_client.complete_openai("prompt", max_tokens=8000)

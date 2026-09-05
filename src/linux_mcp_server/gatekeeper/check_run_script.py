@@ -129,7 +129,16 @@ class GatekeeperResult(BaseModel):
 
     @classmethod
     def structured_output_schema(cls) -> dict[str, Any]:
-        """Flat JSON Schema for provider structured-output APIs."""
+        """Flat JSON Schema for provider structured-output APIs.
+
+        Strict json_schema mode (OpenAI's `strict: true`) requires every key
+        in `properties` to also appear in `required` - there's no notion of
+        an optional property, even one with a Python-side default. `detail`
+        must be listed here even though `GatekeeperResult.detail` defaults
+        to "" - omitting it passes against providers that don't enforce this
+        strictly, but a 400 ("Missing 'detail'") against ones that do (e.g.
+        codex-lb).
+        """
         return {
             "type": "object",
             "properties": {
@@ -139,7 +148,7 @@ class GatekeeperResult(BaseModel):
                 },
                 "detail": {"type": "string"},
             },
-            "required": ["status"],
+            "required": ["status", "detail"],
             "additionalProperties": False,
         }
 

@@ -1,5 +1,6 @@
 """OpenAI Responses API client for the gatekeeper."""
 
+import json
 import os
 
 from typing import Any
@@ -13,7 +14,8 @@ from pydantic import field_validator
 from linux_mcp_server.config import CONFIG
 from linux_mcp_server.gatekeeper.check_run_script import GatekeeperResult
 from linux_mcp_server.gatekeeper.http_utils import DEFAULT_TIMEOUT_SECONDS
-from linux_mcp_server.gatekeeper.http_utils import post_json
+from linux_mcp_server.gatekeeper.http_utils import GatekeeperHTTPError
+from linux_mcp_server.gatekeeper.http_utils import post_maybe_sse
 from linux_mcp_server.gatekeeper.llm import GatekeeperCompletion
 
 
@@ -90,6 +92,42 @@ def _get_openai_api_key() -> str:
     return api_key
 
 
+def _reassemble_sse_response(events: list[dict[str, Any]], provider: str) -> dict[str, Any]:
+    """Rebuild a non-streaming Responses API body from an SSE event stream.
+
+    Some Responses-API-compatible backends (e.g. a self-hosted codex-lb
+    proxy) always stream, ignoring `stream: false`, and their terminal
+    `response.completed` event carries an *empty* `output` array - the
+    actual message content only shows up in per-item
+    `response.output_item.done` events. Reconstruct the `{"output": [...],
+    "usage": {...}}` shape `OpenAIResponse` expects from those instead of
+    trusting `response.completed` to carry it.
+    """
+    output: list[dict[str, Any]] = []
+    usage: dict[str, Any] = {}
+    error: dict[str, Any] | None = None
+
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "message":
+                output.append(item)
+        elif event_type in ("response.completed", "response.failed", "response.incomplete"):
+            response_obj = event.get("response") or {}
+            if response_obj.get("usage"):
+                usage = response_obj["usage"]
+            if response_obj.get("error"):
+                error = response_obj["error"]
+        elif event_type == "error":
+            error = event
+
+    if error is not None:
+        raise GatekeeperHTTPError(provider, 200, json.dumps(error)[:500])
+
+    return {"output": output, "usage": usage}
+
+
 async def complete_openai(
     prompt: str,
     *,
@@ -127,13 +165,14 @@ async def complete_openai(
         if CONFIG.gatekeeper.structured_output
         else None,
     )
-    response = await post_json(
+    json_body, sse_events = await post_maybe_sse(
         provider="openai",
         url=f"{base_url}/responses",
         headers=headers,
         body=request_body.model_dump(exclude_none=True, by_alias=True),
         timeout=timeout,
     )
+    response = json_body if json_body is not None else _reassemble_sse_response(sse_events or [], provider="openai")
     parsed = OpenAIResponse.model_validate(response)
     return GatekeeperCompletion(
         text="".join(part.text for msg in parsed.output for part in msg.content).strip(),
